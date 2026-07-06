@@ -226,3 +226,4 @@ __marimo__/
 checkpoints/*
 data
 local/*
+paper/exp/graphpfn/pretrain/main/pretrain/

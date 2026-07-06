@@ -87,7 +87,10 @@ def _load_graphland_data(
     columns_remained = list(features_df.columns)
 
     # >>> Load labels
-    targets_df = pd.read_csv(path / "targets.csv", index_col=0).astype(np.float32)
+    if "artnet-exp" in str(path):
+        targets_df = pd.read_csv(path / "targets.csv", index_col=0).astype(np.float32).dropna()
+    else:
+        targets_df = pd.read_csv(path / "targets.csv", index_col=0).astype(np.float32)
     labels = targets_df.values.squeeze()
 
     # >>> Load & prepare data split

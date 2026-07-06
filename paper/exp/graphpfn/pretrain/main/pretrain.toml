@@ -21,7 +21,7 @@ n_synthetic_per_gpu = 8
 
 [base_config.evaluation_data.real.data]
 cache = false
-path = "data/artnet-exp"
+path = "/gfs/shared/public/datasets/graphland/data/artnet-exp"
 setting = "transductive"
 internal_split_name = "RL"
 
@@ -38,7 +38,7 @@ frac_policy = "quantile-uniform"
 
 [base_config.evaluation_data.real.data]
 cache = false
-path = "data/city-reviews"
+path = "/gfs/shared/public/datasets/graphland/data/city-reviews"
 setting = "transductive"
 internal_split_name = "RL"
 
@@ -55,7 +55,7 @@ frac_policy = "quantile-uniform"
 
 [base_config.evaluation_data.real.data]
 cache = false
-path = "data/tolokers-2"
+path = "/gfs/shared/public/datasets/graphland/data/tolokers-2"
 setting = "transductive"
 internal_split_name = "RL"
 
@@ -72,7 +72,7 @@ frac_policy = "quantile-uniform"
 
 [base_config.evaluation_data.real.data]
 cache = false
-path = "data/artnet-views"
+path = "/gfs/shared/public/datasets/graphland/data/artnet-views"
 setting = "transductive"
 internal_split_name = "RL"
 
@@ -89,7 +89,7 @@ frac_policy = "quantile-uniform"
 
 [base_config.evaluation_data.real.data]
 cache = false
-path = "data/avazu-ctr"
+path = "/gfs/shared/public/datasets/graphland/data/avazu-ctr"
 setting = "transductive"
 internal_split_name = "RL"
 
@@ -110,7 +110,7 @@ d = 64
 
 [base_config.evaluation_data.real.data]
 cache = false
-path = "data/city-roads-M"
+path = "/gfs/shared/public/datasets/graphland/data/city-roads-M"
 setting = "transductive"
 internal_split_name = "RL"
 
@@ -127,7 +127,7 @@ frac_policy = "quantile-uniform"
 
 [base_config.evaluation_data.real.data]
 cache = false
-path = "data/hm-prices"
+path = "/gfs/shared/public/datasets/graphland/data/hm-prices"
 setting = "transductive"
 internal_split_name = "RL"
 
@@ -144,7 +144,7 @@ frac_policy = "quantile-uniform"
 
 [base_config.evaluation_data.real.data]
 cache = false
-path = "data/twitch-views"
+path = "/gfs/shared/public/datasets/graphland/data/twitch-views"
 setting = "transductive"
 internal_split_name = "RL"
 

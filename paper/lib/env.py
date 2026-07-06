@@ -40,7 +40,7 @@ def get_cache_dir() -> Path:
 
 
 def get_data_dir() -> Path:
-    return get_project_dir() / "data"
+    return Path("/gfs/shared/public/datasets/graphland/data/")
 
 
 def get_exp_dir() -> Path:
