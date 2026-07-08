@@ -76,31 +76,32 @@ def _sample_log_uniform_int(lo: int, hi: int) -> int:
 def _to_prior_dataset(
     data: dict,
     n_train_nodes: int,
-) -> tuple[PriorDataset, int]:
+    n_classes: int,
+) -> PriorDataset:
     """Convert a CausalGraphGenerator draw into a PriorDataset.
 
-    Returns the dataset plus the number of distinct classes. Labels are relabelled to a
-    contiguous ``0..k-1`` range so downstream class checks and cross-entropy line up.
+    The task type follows the *requested* ``n_classes`` (binclass iff it is 2). Labels are
+    relabelled to a contiguous ``0..k-1`` range; if a discretisation bin collapsed, the
+    resulting class count is < ``n_classes`` and ``check_dataset`` rejects the draw so the
+    caller redraws -- this matches the default prior, which also enforces an exact count.
     """
     A = data["A"]  # (n, n) dense adjacency, diagonal already zeroed
     X = data["X"].to(torch.float32)  # (n, n_features)
     y = data["y"]  # (n,) long class ids
 
     _, y_contiguous = torch.unique(y, return_inverse=True)
-    n_classes = int(y_contiguous.max().item()) + 1 if y_contiguous.numel() else 0
     task_type = TaskType.BINCLASS if n_classes == 2 else TaskType.MULTICLASS
 
     src, dst = torch.nonzero(A, as_tuple=True)
     edges = torch.stack([src, dst], dim=0).to(torch.int64)
 
-    dataset = PriorDataset(
+    return PriorDataset(
         features=X,
         labels=y_contiguous.to(torch.float32),
         edges=edges,
         n_train_nodes=n_train_nodes,
         task_type=task_type,
     )
-    return dataset, n_classes
 
 
 def _sample_dataset_with_retry(
@@ -122,15 +123,18 @@ def _sample_dataset_with_retry(
                 rng=rng, n_nodes=n_nodes, n_classes=n_classes, **fixed
             )
             data = CausalGraphGenerator(cfg).generate()
-            dataset, actual_n_classes = _to_prior_dataset(data, n_train_nodes)
+            dataset = _to_prior_dataset(data, n_train_nodes, n_classes)
 
+            # Enforce the *requested* class count (and, via check_class_coverage, that both
+            # the train and test split contain every class) so degenerate single-class
+            # draws are redrawn instead of breaking classification metrics at eval time.
             check_dataset(
                 features=dataset["features"],
                 labels=dataset["labels"],
                 n_train_nodes=n_train_nodes,
                 task_type=dataset["task_type"],
                 min_features=min_features,
-                n_classes=actual_n_classes
+                n_classes=n_classes
                 if dataset["task_type"] == TaskType.MULTICLASS
                 else None,
             )
