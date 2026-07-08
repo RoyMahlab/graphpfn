@@ -151,14 +151,13 @@ def _to_prior_dataset(
     threshold = _threshold_for_degree(S, avg_degree)
     A = (S > threshold).float()
     A.fill_diagonal_(0.0)
-    if A.sum() == 0:
-        # A tie-plateau at the top of the similarity distribution (some kernels/frames,
-        # e.g. 'rank', produce many equal values) can make strict `>` drop every edge;
-        # fall back to `>=` to include that plateau.
-        A = (S >= threshold).float()
-        A.fill_diagonal_(0.0)
     n_edges = int(A.sum().item())
-    if n_edges == 0 or n_edges >= n * (n - 1):
+    # Redraw graphs that are too sparse or near-complete. A tie-plateau in the similarity
+    # matrix (some kernels/frames, e.g. 'rank', produce many equal values) can collapse the
+    # edge set far below the target degree; too few edges leaves the SSL edge sampler with
+    # nothing to mask (int(n_edges * mask_rate) == 0 -> DGL "num_samples > 0" error), so we
+    # require at least an average directed degree of 1.
+    if n_edges < n or n_edges >= n * (n - 1):
         raise SanityCheckError(
             f"degenerate similarity graph: n_edges={n_edges}, n_nodes={n}"
         )
