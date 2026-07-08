@@ -52,6 +52,14 @@ class RangeConfig(TypedDict):
     max: float
 
 
+class MixedLogUniformConfig(TypedDict):
+    min_first: float
+    max_first: float
+    min_second: float
+    max_second: float
+    p_first: float
+
+
 class CausalPriorConfig(TypedDict):
     """Config for the causal-graph prior (the ``[causal_prior]`` config section)."""
 
@@ -59,6 +67,7 @@ class CausalPriorConfig(TypedDict):
     max_num_classes: int  # class count is drawn uniform_int(2, max_num_classes) per batch
     n_nodes: RangeConfig  # log-uniform-int graph size, drawn once per batch
     train_ratio: RangeConfig  # uniform train fraction, drawn once per batch
+    avg_degree: MixedLogUniformConfig  # target mean degree, drawn once per batch
     # Optionally pin any GraphConfig field (e.g. {"similarity": "cosine"}); otherwise the
     # similarity kernel and SCM hyperparameters are sampled by sample_config.
     fixed: NotRequired[dict]
@@ -71,6 +80,45 @@ def _sample_log_uniform_int(lo: int, hi: int) -> int:
     return int(round(float(np.exp(np.random.uniform(np.log(lo), np.log(hi))))))
 
 
+def _sample_mixed_log_uniform(spec: MixedLogUniformConfig) -> float:
+    """Mirror lib.graphpfn.prior.config._sample_mixed_log_uniform (the avg_degree draw)."""
+    if np.random.random() < spec["p_first"]:
+        log_min, log_max = np.log(spec["min_first"]), np.log(spec["max_first"])
+    else:
+        log_min, log_max = np.log(spec["min_second"]), np.log(spec["max_second"])
+    return float(np.exp(np.random.uniform(log_min, log_max)))
+
+
+# >>> Graph construction
+
+
+def _threshold_for_degree(S: torch.Tensor, avg_degree: float) -> float:
+    """Similarity threshold whose super-threshold off-diagonal pairs give ~``avg_degree``.
+
+    The raw similarity-threshold prior (``sim_threshold ~ U(-1, 1)``) produces graphs whose
+    density swings from empty to near-complete; near-complete graphs make DGL's negative
+    sampler overflow. Instead we pick the threshold as a quantile of the similarity values
+    so the mean degree matches ``avg_degree`` -- the same knob (and distribution) the default
+    prior uses to control density.
+    """
+    n = S.shape[0]
+    if n <= 1:
+        return float("inf")
+    frac = min(max(avg_degree / (n - 1), 0.0), 1.0)  # fraction of off-diag pairs to keep
+    if frac <= 0.0:
+        return float("inf")
+    if frac >= 1.0:
+        return float("-inf")
+
+    off_diagonal = S[~torch.eye(n, dtype=torch.bool, device=S.device)]
+    # Subsample to stay cheap and within torch.quantile's element-count limit.
+    max_samples = 1_000_000
+    if off_diagonal.numel() > max_samples:
+        idx = torch.randint(off_diagonal.numel(), (max_samples,), device=S.device)
+        off_diagonal = off_diagonal[idx]
+    return float(torch.quantile(off_diagonal, 1.0 - frac).item())
+
+
 # >>> Dataset conversion
 
 
@@ -78,6 +126,7 @@ def _to_prior_dataset(
     data: dict,
     n_train_nodes: int,
     n_classes: int,
+    avg_degree: float,
 ) -> PriorDataset:
     """Convert a CausalGraphGenerator draw into a PriorDataset.
 
@@ -89,10 +138,30 @@ def _to_prior_dataset(
     Features that are constant on the *training* split are dropped (as the default prior
     does): the LimiX preprocessor filters such columns internally, so leaving them in makes
     ``num_used_features`` disagree with ``features.shape[-1]`` and corrupts the model.
+
+    The adjacency is rebuilt from the similarity matrix at a threshold chosen to hit
+    ``avg_degree`` (see :func:`_threshold_for_degree`), rather than the generator's raw
+    ``sim_threshold``, to keep graph density in the well-behaved regime the model trains on.
     """
-    A = data["A"]  # (n, n) dense adjacency, diagonal already zeroed
+    S = data["S"]  # (n, n) similarity matrix, symmetric
     X = data["X"].to(torch.float32)  # (n, n_features)
     y = data["y"]  # (n,) long class ids
+
+    n = S.shape[0]
+    threshold = _threshold_for_degree(S, avg_degree)
+    A = (S > threshold).float()
+    A.fill_diagonal_(0.0)
+    if A.sum() == 0:
+        # A tie-plateau at the top of the similarity distribution (some kernels/frames,
+        # e.g. 'rank', produce many equal values) can make strict `>` drop every edge;
+        # fall back to `>=` to include that plateau.
+        A = (S >= threshold).float()
+        A.fill_diagonal_(0.0)
+    n_edges = int(A.sum().item())
+    if n_edges == 0 or n_edges >= n * (n - 1):
+        raise SanityCheckError(
+            f"degenerate similarity graph: n_edges={n_edges}, n_nodes={n}"
+        )
 
     # Drop columns that are constant across the training rows (matches graph_then_attributes).
     _, feature_mask = drop_constant_features(X[:n_train_nodes, :])
@@ -118,6 +187,7 @@ def _sample_dataset_with_retry(
     n_nodes: int,
     n_train_nodes: int,
     n_classes: int,
+    avg_degree: float,
     max_retries: int = 3,
 ) -> PriorDataset:
     min_features = config["min_features"]
@@ -132,7 +202,7 @@ def _sample_dataset_with_retry(
                 rng=rng, n_nodes=n_nodes, n_classes=n_classes, **fixed
             )
             data = CausalGraphGenerator(cfg).generate()
-            dataset = _to_prior_dataset(data, n_train_nodes, n_classes)
+            dataset = _to_prior_dataset(data, n_train_nodes, n_classes, avg_degree)
 
             # Enforce the *requested* class count (and, via check_class_coverage, that both
             # the train and test split contain every class) so degenerate single-class
@@ -166,9 +236,9 @@ def sample_causal_batch(
 ) -> PriorDatasetBatch:
     """Sample a batch of causal-graph datasets and move it to ``device``.
 
-    ``n_nodes``, ``train_ratio`` and the class count are drawn once per batch (shared
-    across the batch, like the default prior's ``_shared_`` fields) so every dataset in
-    the batch has a consistent split and task type.
+    ``n_nodes``, ``train_ratio``, ``avg_degree`` and the class count are drawn once per
+    batch (shared across the batch, like the default prior's ``_shared_`` fields) so every
+    dataset in the batch has a consistent split, density and task type.
     """
     while True:
         try:
@@ -182,9 +252,12 @@ def sample_causal_batch(
             )
             n_train_nodes = int(n_nodes * train_ratio)
             n_classes = int(np.random.randint(2, int(config["max_num_classes"]) + 1))
+            avg_degree = _sample_mixed_log_uniform(config["avg_degree"])
 
             datasets = [
-                _sample_dataset_with_retry(config, n_nodes, n_train_nodes, n_classes)
+                _sample_dataset_with_retry(
+                    config, n_nodes, n_train_nodes, n_classes, avg_degree
+                )
                 for _ in range(batch_size)
             ]
             batch = _pad_and_batch(datasets)
