@@ -23,7 +23,14 @@ import lib
 from lib import KWArgs, PartKey
 from lib.graph.data import GraphDataset, TaskType
 from lib.graphpfn.model import GraphPFN
-from lib.graphpfn.prior import GraphPriorSampler, GraphPriorSamplerDDP
+from lib.graphpfn.prior import (
+    CausalGraphPriorSampler,
+    CausalGraphPriorSamplerDDP,
+    GraphPriorSampler,
+    GraphPriorSamplerDDP,
+    sample_batch,
+    sample_causal_batch,
+)
 from lib.graphpfn.prior.prior_typings import DistributionConfig
 from lib.graphpfn.util import SimpleEdgeSampler
 from lib.util import backup, make_seed, random_float, tracker
@@ -52,7 +59,11 @@ class Config(TypedDict):
     optimizer: KWArgs
     epoch_size: int
     batch_size: int
-    prior: KWArgs
+    # Graph-generation prior: "graphpfn" (default) uses `prior`; "causal_graph" uses
+    # `causal_prior` (casual_graph_generation.CausalGraphGenerator).
+    prior_method: NotRequired[str]
+    prior: NotRequired[KWArgs]
+    causal_prior: NotRequired[KWArgs]
     sampler: NotRequired[KWArgs]
     model: NotRequired[KWArgs]
     ssl: NotRequired[KWArgs]
@@ -154,9 +165,10 @@ def get_synthetic_eval_dataset(
     idx: int,
     config: DistributionConfig,
     base_seed: int,
+    sample_batch_fn: Callable = sample_batch,
 ) -> GraphDataset:
     delu.random.seed(make_seed(base_seed, "eval", lib.get_rank(), idx))
-    batch = lib.graphpfn.prior.sample_batch(config, 1, torch.device("cpu"))
+    batch = sample_batch_fn(config, 1, torch.device("cpu"))
     datasets = lib.graphpfn.prior.unbatch_prior_dataset(batch)
     assert len(datasets) == 1
     name = f"synthetic-{idx:03d}"
@@ -167,11 +179,14 @@ def test_synthetic_eval_dataset_determinism(
     n_datasets: int,
     config: DistributionConfig,
     base_seed: int,
+    sample_batch_fn: Callable = sample_batch,
 ) -> None:
     """Checks that synthetic dataset generation for evaluation is deterministic"""
     for idx in range(n_datasets):
-        first = get_synthetic_eval_dataset(idx, config, base_seed).data
-        second = get_synthetic_eval_dataset(idx, config, base_seed).data
+        first = get_synthetic_eval_dataset(idx, config, base_seed, sample_batch_fn).data
+        second = get_synthetic_eval_dataset(
+            idx, config, base_seed, sample_batch_fn
+        ).data
 
         assert first["name"] == second["name"]
         np.testing.assert_array_equal(first["labels"], second["labels"])
@@ -354,16 +369,35 @@ def main(
         graphpfn_ema = graphpfn_without_ddp
 
     # >>> datasets
-    sampler_cls = GraphPriorSamplerDDP if lib.is_ddp() else GraphPriorSampler
+    prior_method = config.get("prior_method", "graphpfn")
+    if prior_method == "causal_graph":
+        assert "causal_prior" in config, (
+            'prior_method="causal_graph" requires a `causal_prior` config section'
+        )
+        prior_config = config["causal_prior"]
+        sample_batch_fn = sample_causal_batch
+        sampler_cls = (
+            CausalGraphPriorSamplerDDP if lib.is_ddp() else CausalGraphPriorSampler
+        )
+    elif prior_method == "graphpfn":
+        assert "prior" in config, 'prior_method="graphpfn" requires a `prior` config section'
+        prior_config = config["prior"]
+        sample_batch_fn = sample_batch
+        sampler_cls = GraphPriorSamplerDDP if lib.is_ddp() else GraphPriorSampler
+    else:
+        raise ValueError(f"Unknown prior_method: {prior_method!r}")
+    logger.info(f"Using prior_method={prior_method!r}")
+
     graph_prior = sampler_cls(
-        config=config["prior"],
+        config=prior_config,
         seed=make_seed(config["seed"], "sampler", resume_step),
         **config.get("sampler", {}),
     )
     test_synthetic_eval_dataset_determinism(
         config["evaluation_data"]["n_synthetic_per_gpu"],
-        config["prior"],
+        prior_config,
         config["seed"],
+        sample_batch_fn,
     )
 
     # >>> prepare training
@@ -462,8 +496,9 @@ def main(
         amp_enabled=amp_enabled,
         get_synthetic_eval_dataset_fn=partial(
             get_synthetic_eval_dataset,
-            config=config["prior"],
+            config=prior_config,
             base_seed=config["seed"],
+            sample_batch_fn=sample_batch_fn,
         ),
         parts=["val", "test"],
     )
