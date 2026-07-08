@@ -36,6 +36,7 @@ from lib.graphpfn.prior.casual_graph_generation import CausalGraphGenerator, sam
 from lib.util import TaskType, get_world_size, is_master_process
 
 from .checks import SanityCheckError, check_dataset
+from .postprocessing import drop_constant_features
 from .prior_typings import PriorDataset, PriorDatasetBatch
 from .sampler import (
     GraphPriorSampler,
@@ -84,10 +85,18 @@ def _to_prior_dataset(
     relabelled to a contiguous ``0..k-1`` range; if a discretisation bin collapsed, the
     resulting class count is < ``n_classes`` and ``check_dataset`` rejects the draw so the
     caller redraws -- this matches the default prior, which also enforces an exact count.
+
+    Features that are constant on the *training* split are dropped (as the default prior
+    does): the LimiX preprocessor filters such columns internally, so leaving them in makes
+    ``num_used_features`` disagree with ``features.shape[-1]`` and corrupts the model.
     """
     A = data["A"]  # (n, n) dense adjacency, diagonal already zeroed
     X = data["X"].to(torch.float32)  # (n, n_features)
     y = data["y"]  # (n,) long class ids
+
+    # Drop columns that are constant across the training rows (matches graph_then_attributes).
+    _, feature_mask = drop_constant_features(X[:n_train_nodes, :])
+    X = X[:, feature_mask]
 
     _, y_contiguous = torch.unique(y, return_inverse=True)
     task_type = TaskType.BINCLASS if n_classes == 2 else TaskType.MULTICLASS
